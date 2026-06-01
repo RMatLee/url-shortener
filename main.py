@@ -75,6 +75,12 @@ def shorten_url(body: ShortenRequest):
         conn.commit()
     finally:
         conn.close()
+
+    # Pre-warm cache
+    try:
+        cache_set(short_code, str(body.long_url), body.expires_at)
+    except Exception:
+        pass # Cache failure is non fatal
     
     return ShortenResponse(
         short_url=f"{BASE_URL}/{short_code}",
@@ -88,13 +94,42 @@ def shorten_url(body: ShortenRequest):
 @app.get("/{short_code}")
 def redirecct(short_code: str):
     """
-    1. Look up short code in DB
-    2. Check if URL has expired
-    3. Increment the hit counter
-    4. Return HTTP 302 to the original URL
-
-    Note: 301 is cached by browsers - the redirect never hits our server again, so we lose the ability to track clicks or update the destination. 302 keeps every request flowing through us.
+    1. Check Redis first
+        - Cache hit means redirect immediately
+        - Cached miss means return 404
+        - Not in cache means fall through to DB
+    2. DB lookup
+        - Not found cache negative result, return 404
+        - Found but expired, return 410
+        - Found, write to cache and redirect
+    3. Increment hit_count asynchronously (to avoid many writes we will do in 60s batches)
     """
+    # 1. Cache Check
+    try:
+        cached = cache_get(short_code)
+
+        if cached is not None:
+            # Cache hit so check expiry
+            expires_at_str = cached.get("expires_at")
+
+            if expires_at_str:
+                expires_at = datetime.fromisoformat(expires_at_str)
+
+                if datetime.utcnow() > expires_at:
+                    raise HTTPException(status_code=410, detail="This short URL has expired")
+                
+                _increment_hit_count(short_code)
+
+                return RedirectResponse(url=cached[long_url], status_code=302)
+    except LookupError:
+        # Cached negative result
+        raise HTTPException(status_code=404, detail="Short URL not found.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass # Redis could be down so pass to DB
+
+    # DB Fallback
     conn = get_connection()
 
     try:
@@ -106,31 +141,52 @@ def redirecct(short_code: str):
             )
 
             row = cur.fetchone()
-
-            if row is None:
-                raise HTTPException(status_code=404, detail="Short URL nto found.")
-            
-            long_url, expires_at = row
-
-            # 2. Check expiry
-            if expires_at and datetime.utcnow() > expires_at:
-                raise HTTPException(status_code=410, detail="This short URL has expired")
-            
-            # 3. Increment hti count
-            cur.execute(
-                "UPDATE urls SET hit_count = hit_count + 1 WHERE short_code = %s",
-                (short_code,),
-            )
-
-        conn.commit()
-
     finally:
         conn.close()
+
+    if row is None:
+        try:
+            cache_set_not_found(short_code)
+        
+        except Exception:
+            pass
+
+        raise HTTPException(status_code=404, detail="Short URL not found.")
+    
+    long_url, expires_at = row
+
+    # 2. Check expiry
+    if expires_at and datetime.utcnow() > expires_at:
+        raise HTTPException(status_code=410, detail="This short URL has expired")
+    
+    # Write to cache for next time
+    try:
+        cache_set(short_code, long_url, expires_at)
+    except Exception:
+        pass
+
+    # 3. Increment hit count
+    _increment_hit_count(short_code)
 
     # 4. Redirect
     return RedirectResponse(url=long_url, status_code=302)
 
+def _increment_hit_count(short_code: str):
+    """
+    Increment hit_count of DB. Non-fatal if it fails
 
+    Note: This can become a write bottleneck
+    """
+    try:
+        conn = get_connection()
+        with conn.cursor() as cur:
+            cur.execute(
+                "UPDATE urls SET hit_count = hit_count + 1 WHERE short_code = %s",
+            )
+        conn.commit()
+        conn.close()
+    except Exception:
+        pass
 
 # ---------------------------------------------------------------------------
 # GET /stats/{short_code}  —  Bonus: inspect a URL's metadata
@@ -173,4 +229,15 @@ def stats(short_code: str):
         "created_at": created_at,
         "expires_at": expires_at,
         "hit_count": hit_count,
+    }
+
+# ---------------------------------------------------------------------------
+# GET /health  —  Health check
+# ---------------------------------------------------------------------------
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "redis": cache_ping(),
     }
