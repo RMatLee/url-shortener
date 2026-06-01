@@ -58,7 +58,7 @@ def shorten_url(body: ShortenRequest):
                 VALUES (%s, %s)
                 RETURNING id
                 """,
-                (str(body.long_url, body.expires_at))
+                (str(body.long_url), body.expires_at)
             )
 
             row_id = cur.fetchone()[0]
@@ -89,6 +89,60 @@ def shorten_url(body: ShortenRequest):
     )
 
 # ---------------------------------------------------------------------------
+# GET /health  —  Health check
+# ---------------------------------------------------------------------------
+
+@app.get("/health")
+def health():
+    return {
+        "status": "ok",
+        "redis": cache_ping(),
+    }
+
+# ---------------------------------------------------------------------------
+# GET /stats/{short_code}  —  Bonus: inspect a URL's metadata
+# ---------------------------------------------------------------------------
+
+@app.get("/stats/{short_code}")
+def stats(short_code: str):
+    """
+    Additional endpoint
+
+    Shows the long URL, creation time, expiry, and hit count
+    """
+    conn = get_connection()
+
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT long_url, created_at, expires_at, hit_count
+                FROM urls
+                WHERE short_code = %s
+                """,
+                (short_code,),
+            )
+
+            row = cur.fetchone()
+
+    finally:
+        conn.close()
+
+    if row is None:
+        raise HTTPException(status_code=404, detail="Short URL not found.")
+
+    long_url, created_at, expires_at, hit_count = row
+
+    return {
+        "short_code": short_code,
+        "short_url": f"{BASE_URL}/{short_code}",
+        "long_url": long_url,
+        "created_at": created_at,
+        "expires_at": expires_at,
+        "hit_count": hit_count,
+    }
+
+# ---------------------------------------------------------------------------
 # GET /{short_code}  —  Redirect to original URL
 # ---------------------------------------------------------------------------
 @app.get("/{short_code}")
@@ -117,10 +171,10 @@ def redirecct(short_code: str):
 
                 if datetime.utcnow() > expires_at:
                     raise HTTPException(status_code=410, detail="This short URL has expired")
-                
-                _increment_hit_count(short_code)
 
-                return RedirectResponse(url=cached[long_url], status_code=302)
+            _increment_hit_count(short_code)
+
+            return RedirectResponse(url=cached["long_url"], status_code=302)
     except LookupError:
         # Cached negative result
         raise HTTPException(status_code=404, detail="Short URL not found.")
@@ -182,62 +236,10 @@ def _increment_hit_count(short_code: str):
         with conn.cursor() as cur:
             cur.execute(
                 "UPDATE urls SET hit_count = hit_count + 1 WHERE short_code = %s",
+                (short_code,)
             )
         conn.commit()
         conn.close()
     except Exception:
         pass
 
-# ---------------------------------------------------------------------------
-# GET /stats/{short_code}  —  Bonus: inspect a URL's metadata
-# ---------------------------------------------------------------------------
-
-@app.get("/stats/{short_code}")
-def stats(short_code: str):
-    """
-    Additional endpoint
-
-    Shows the long URL, creation time, expiry, and hit count
-    """
-    conn = get_connection()
-
-    try:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT long_url, created_at, expires_at, hit_count
-                FROM urls
-                WHERE short_code = %s
-                """,
-                (short_code,),
-            )
-
-            row = cur.fetchone()
-
-    finally:
-        conn.close()
-
-    if row is None:
-        raise HTTPException(status_code=404, detail="Short URL not found.")
-    
-    long_url, created_at, expires_at, hit_count = row
-
-    return {
-        "short_code": short_code,
-        "short_url": f"{BASE_URL}/{short_code}",
-        "long_url": long_url,
-        "created_at": created_at,
-        "expires_at": expires_at,
-        "hit_count": hit_count,
-    }
-
-# ---------------------------------------------------------------------------
-# GET /health  —  Health check
-# ---------------------------------------------------------------------------
-
-@app.get("/health")
-def health():
-    return {
-        "status": "ok",
-        "redis": cache_ping(),
-    }

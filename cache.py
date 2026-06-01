@@ -42,7 +42,7 @@ def cache_get(short_code: str) -> Optional[dict]:
     if value == NOT_FOUND_SENTINEL:
         raise LookupError("Cached negative result -- URL Does not Exist.")
     
-    return json.load(value)
+    return json.loads(value)
 
 def cache_set(short_code: str, long_url: str, expires_at=None):
     """
@@ -51,12 +51,12 @@ def cache_set(short_code: str, long_url: str, expires_at=None):
     """
     client = _get_client()
 
-    payload = json.dump({
+    payload = json.dumps({
         "long_url": long_url,
         "expires_at": expires_at.isoformat() if expires_at else None,
     })
 
-    # If URL has its own expiry, don't cache it longer that it
+    # If URL has its own expiry, don't cache it longer than it
     ttl = CACHE_TTL
 
     if expires_at:
@@ -68,10 +68,10 @@ def cache_set(short_code: str, long_url: str, expires_at=None):
 
         if seconds_until_expiry <= 0:
             return # Already expired
-        
+
         ttl = min(ttl, seconds_until_expiry)
 
-        client.setex(f"url:{short_code}", ttl, payload)
+    client.setex(f"url:{short_code}", ttl, payload)
 
 def cache_set_not_found(short_code: str):
     """
@@ -88,7 +88,7 @@ def cache_invalidate(short_code: str):
     client = _get_client()
     client.delete(f"url:{short_code}")
 
-def cache_pint() -> bool:
+def cache_ping() -> bool:
     """
     Health check
     """

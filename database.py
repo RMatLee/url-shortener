@@ -24,14 +24,15 @@ def init_db():
             cur.execute("""
                 CREATE TABLE IF NOT EXISTS urls (
                         id          BIGSERIAL PRIMARY KEY,
-                        short_code  VARCHAR(12) UNIQUE NOT NULL,
+                        short_code  VARCHAR(12) UNIQUE,
                         long_url    TEXT NOT NULL,
                         created_at  TIMESTAMP DEFAULT NOW(),
                         expires_at  TIMESTAMP,
                         hit_count   BIGINT DEFAULT 0
                 );
                 
-                -- Index on short_code since every redirect lookup hits this column CREATE INDEX IF NOT EXISTS idx_short_code on urls(short_code)
+                -- Index on short_code since every redirect lookup hits this column
+                CREATE INDEX IF NOT EXISTS idx_short_code ON urls(short_code);
             """)
         
         conn.commit()
